@@ -1,0 +1,33 @@
+# ROS 2 / colcon build outputs
+build/
+install/
+log/
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Nested repository metadata from vendored examples
+src/**/.git/
+
+# C/C++ build artifacts
+*.o
+*.so
+*.a
+*.d
+
+# Editor and local tool caches
+.vscode/
+.cache/
+.codex/
+.agents/
+
+# Runtime logs and temporary files
+*.log
+*.tmp
+*.swp
+*~
+
+# OS files
+.DS_Store
+Thumbs.db

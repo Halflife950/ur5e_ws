@@ -692,7 +692,293 @@ ur_moveit_config/config/kinematics.yaml
 
 ---
 
-# II. Gazebo 中的 UR5e 运动 Demo
+# II. UR5e 真机运行流程
+
+本章记录真实 UR5e 机械臂的启动流程。真机运行前必须先在 Gazebo 或 Fake Hardware 中跑通相同 demo，并确认现场没有人员、工具或线缆处在机械臂运动范围内。
+
+真机和仿真的主要区别是：
+
+```text
+仿真：Gazebo 提供机器人、控制器和 joint_states
+真机：UR ROS 2 Driver 连接真实控制柜，MoveIt 只负责规划和发送轨迹
+```
+
+## 1. 打通真机网络连接
+
+确认 Ubuntu 主机和 UR5e 在同一个网段。例如：
+
+```text
+电脑：192.168.2.123/24
+UR5e：192.168.2.100/24
+```
+
+检查网络连通：
+
+```bash
+ping 192.168.2.100
+```
+
+还需要确认以下通信链路正常：
+
+```text
+Dashboard
+RTDE
+Primary Client Interface
+TCP 30001
+```
+
+如果能 ping 通但驱动无法启动，优先检查防火墙、网线、IP 网段、示教器网络设置和 URCap/External Control 配置。
+
+---
+## 2. 在 Ubuntu 远程操作真实 PolyScope
+
+最初尝试过 Docker 版 URSim，但 URSim 是独立的虚拟机器人，不能同步真实机械臂位姿。真机调试时，应操作真实示教器上的 PolyScope。
+
+如果真实示教器开启了 VNC，可以在 Ubuntu 中使用 Remmina 连接：
+
+```text
+192.168.2.100:5900
+```
+
+连接后，在 Ubuntu 中查看和操作真实 PolyScope，并将机器人切换到远程控制模式。启动 ROS 2 driver 前，应确认机器人处于可远程控制、可接收 External Control 程序的状态。
+
+---
+## 3. `urcl_ws` overlay 的作用
+
+真机启动时曾持续出现：
+
+```text
+Could not get configuration package within timeout
+Configured timeout: 1 sec
+```
+
+排查后确认：
+
+```text
+Dashboard 正常
+RTDE 正常
+TCP 30001 正常
+真机能够发送 Primary Interface 数据
+```
+
+问题来自 `ur_client_library 2.11.0` 中获取 configuration package 的固定 `1s` 超时。为避免直接修改系统 APT 包，创建了独立 overlay workspace：
+
+```text
+~/urcl_ws
+```
+
+核心修改是把超时时间从：
+
+```cpp
+std::chrono::milliseconds timeout(1000);
+```
+
+改为：
+
+```cpp
+std::chrono::milliseconds timeout(10000);
+```
+
+然后重新编译 overlay，让 ROS 2 在运行时优先使用 `~/urcl_ws/install` 中的同名库。这个 workspace 主要服务于真机问题；只跑 Gazebo 仿真时通常不需要它。
+
+---
+## 4. 真机 source 顺序
+
+真机运行时，终端环境必须按顺序加载：
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/urcl_ws/install/setup.bash
+source ~/ur5e_ws/install/setup.bash
+```
+
+顺序含义：
+
+```text
+/opt/ros/humble        ROS 2 和 APT 安装的基础包
+~/urcl_ws/install      覆盖 ur_client_library 等真机驱动相关库
+~/ur5e_ws/install      当前教程和 demo 包
+```
+
+确认当前使用的是 overlay 中的 `ur_client_library`：
+
+```bash
+ros2 pkg prefix ur_client_library
+```
+
+期望输出类似：
+
+```text
+/home/tinavi/urcl_ws/install/ur_client_library
+```
+
+如果输出仍然指向 `/opt/ros/humble`，说明 `urcl_ws` 没有 source，或者 source 顺序不对。
+
+---
+## 5. 启动真机驱动和 MoveIt
+
+### 终端 1：启动 UR ROS 2 Driver
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/urcl_ws/install/setup.bash
+source ~/ur5e_ws/install/setup.bash
+
+ros2 launch ur_robot_driver ur_control.launch.py \
+  ur_type:=ur5e \
+  robot_ip:=192.168.2.100 \
+  headless_mode:=true \
+  launch_rviz:=false
+```
+
+如果现场需要手动在示教器上启动 External Control 程序，可以将 `headless_mode` 设为 `false`，并按示教器提示操作。
+
+### 终端 2：启动 MoveIt 和 RViz
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/urcl_ws/install/setup.bash
+source ~/ur5e_ws/install/setup.bash
+
+ros2 launch ur_moveit_config ur_moveit.launch.py \
+  ur_type:=ur5e \
+  launch_rviz:=true
+```
+
+完成后，真机、ROS 2、MoveIt 和 RViz 应建立联动。
+
+---
+## 6. 真机状态检查
+
+确认 `/joint_states` 只有一个发布者：
+
+```bash
+ros2 topic info /joint_states
+```
+
+正常情况下发布者应来自：
+
+```text
+joint_state_broadcaster
+```
+
+检查控制器：
+
+```bash
+ros2 control list_controllers
+```
+
+正常应看到：
+
+```text
+joint_state_broadcaster                    active
+scaled_joint_trajectory_controller         active
+```
+
+读取一次关节状态：
+
+```bash
+ros2 topic echo /joint_states --once
+```
+
+如果 `/joint_states` 有多个发布者，常见原因是同时启动了 Gazebo、Fake Hardware 或其他 joint state publisher。真机运行时，不要同时启动仿真环境。
+
+---
+## 7. 运行真机 demo
+
+真机 demo 建议从慢速、小范围动作开始。每次运行前，都确认 RViz 中当前机械臂位姿和真实机械臂一致。
+
+### 笛卡尔路径循环
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/urcl_ws/install/setup.bash
+source ~/ur5e_ws/install/setup.bash
+
+ros2 launch ur5e_cartesian_motion cartesian_draw_loop_real.launch.py \
+  mode:=line
+```
+
+支持的模式：
+
+```text
+line
+square
+circle
+```
+
+### CSV 曲线路径
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/urcl_ws/install/setup.bash
+source ~/ur5e_ws/install/setup.bash
+
+ros2 launch ur5e_curve_path curve_path_real.launch.py
+```
+
+真机执行 CSV 曲线前，建议先在仿真中运行：
+
+```bash
+ros2 launch ur5e_curve_path curve_path_sim.launch.py
+```
+
+确认路径范围、起始关节位姿、速度限制和末端姿态都合理后，再切到真机。
+
+---
+## 8. 真机 Cartesian Path 异常排查
+
+曾遇到 `cartesian_path` 规划 fraction 很低，例如：
+
+```text
+Cartesian fraction 只有 0.008 或 0.009
+```
+
+同时可能出现：
+
+```text
+Semantic description is not specified for the same robot as the URDF
+```
+
+进一步检查发现：
+
+```text
+robot_state_publisher URDF: ur5e
+move_group URDF: ur
+move_group SRDF: ur
+```
+
+问题本质是 URDF 和 SRDF 的 robot name 不一致，或 demo 节点没有拿到和 `move_group` 一致的 `robot_description`、`robot_description_semantic`、`robot_description_kinematics`。
+
+真机 launch 文件中应统一加载：
+
+```text
+robot_description
+robot_description_semantic
+robot_description_kinematics
+```
+
+修复后应满足：
+
+```text
+URDF 与 SRDF 匹配
+getCurrentPose() 稳定正常
+Cartesian Path 规划正常
+真机运动与仿真逻辑一致
+```
+
+如果再次出现类似问题，优先检查：
+
+```bash
+ros2 param get /robot_state_publisher robot_description
+ros2 param get /move_group robot_description
+ros2 param get /move_group robot_description_semantic
+ros2 param get /move_group robot_description_kinematics
+```
+
+---
+
+# III. Gazebo 中的 UR5e 运动 Demo
 
 本章开始使用当前 workspace 中的示例包，在 Gazebo 仿真环境里逐步验证 UR5e 的运动控制流程。
 
@@ -1065,4 +1351,59 @@ ros2 launch ur5e_cartesian_motion cartesian_draw_loop.launch.py --show-args
 
 ---
 
-最近维护日期：2026年6月29日
+# IV. Git 团队协作建议
+
+本仓库建议只提交源码、配置、路径文件、图片和 README，不提交本机编译产物。
+
+已经通过 `.gitignore` 忽略：
+
+```text
+build/
+install/
+log/
+.vscode/
+__pycache__/
+*.pyc
+```
+
+首次推送到远端仓库：
+
+```bash
+cd ~/ur5e_ws
+git remote add origin <你的远端仓库地址>
+git push -u origin main
+```
+
+后续修改代码或文档后：
+
+```bash
+git status
+git add README.md src/ur5e_curve_path src/ur5e_cartesian_motion
+git commit -m "Update real robot setup notes"
+git push
+```
+
+队友拉取：
+
+```bash
+git clone <仓库地址> ~/ur5e_ws
+cd ~/ur5e_ws
+source /opt/ros/humble/setup.bash
+colcon build --symlink-install --executor sequential --parallel-workers 1
+source install/setup.bash
+```
+
+如果队友需要跑真机，还必须单独准备 `~/urcl_ws`，并确认：
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/urcl_ws/install/setup.bash
+source ~/ur5e_ws/install/setup.bash
+ros2 pkg prefix ur_client_library
+```
+
+输出应指向 `~/urcl_ws/install/ur_client_library`。如果只跑 Gazebo 仿真，可以不准备 `urcl_ws`。
+
+---
+
+最近维护日期：2026年7月6日

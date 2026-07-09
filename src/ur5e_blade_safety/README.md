@@ -459,6 +459,8 @@ require_safe_before_preinsert: true
 approach_extra_offset: 0.08
 velocity_scaling: 0.05
 acceleration_scaling: 0.05
+max_cartesian_speed: 0.02
+cartesian_speed_link: blade_center_link
 ```
 
 说明：
@@ -468,6 +470,8 @@ executor 内仍保留一些旧的安全检查和 insert 执行代码路径
 但当前 tuning 文件只暴露初始化到 pre-insert 所需参数
 运行时任意外部运动的中断交给 blade_motion_safety_interlock
 ```
+
+`max_cartesian_speed` 会对 executor 内部的 Cartesian 轨迹做重定时，当前主要限制 `approach -> pre-insert` 段的刀头线速度。默认用 `blade_center_link` 作为限速参考点，避免接近 pre-insert 时运动过快。
 
 ## 11. cartesian_forward_probe
 

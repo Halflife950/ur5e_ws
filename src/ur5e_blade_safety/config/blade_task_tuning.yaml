@@ -123,6 +123,8 @@ opening_insert_executor:
     velocity_scaling: 0.05
     acceleration_scaling: 0.05
     preinsert_ik_timeout_s: 0.2
+    max_cartesian_speed: 0.02
+    cartesian_speed_link: blade_center_link
     cartesian_eef_step: 0.002
     cartesian_jump_threshold: 0.0
     min_cartesian_fraction: 0.95

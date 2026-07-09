@@ -100,6 +100,11 @@ geometry_msgs::msg::Pose transformToPose(const tf2::Transform & transform)
   return pose;
 }
 
+double durationToSeconds(const builtin_interfaces::msg::Duration & duration)
+{
+  return static_cast<double>(duration.sec) + static_cast<double>(duration.nanosec) * 1.0e-9;
+}
+
 }  // namespace
 
 class OpeningInsertExecutor
@@ -128,6 +133,8 @@ public:
     node_->declare_parameter<double>("velocity_scaling", 0.05);
     node_->declare_parameter<double>("acceleration_scaling", 0.05);
     node_->declare_parameter<double>("preinsert_ik_timeout_s", 0.2);
+    node_->declare_parameter<double>("max_cartesian_speed", 0.02);
+    node_->declare_parameter<std::string>("cartesian_speed_link", "blade_center_link");
     node_->declare_parameter<bool>("use_preferred_ik_seed", true);
     node_->declare_parameter<double>("preferred_shoulder_pan_joint", 0.0);
     node_->declare_parameter<double>("preferred_shoulder_lift_joint", -1.2217305);
@@ -931,6 +938,10 @@ private:
       return false;
     }
 
+    if (!applyCartesianSpeedLimit(move_group, trajectory, "approach-to-preinsert")) {
+      return false;
+    }
+
     MoveGroupInterface::Plan plan;
     plan.trajectory_ = trajectory;
 
@@ -1039,9 +1050,111 @@ private:
       return false;
     }
 
+    if (!applyCartesianSpeedLimit(move_group, trajectory, stage)) {
+      return false;
+    }
+
     MoveGroupInterface::Plan plan;
     plan.trajectory_ = trajectory;
     return executePlanWithSafety(move_group, plan, stage);
+  }
+
+  bool applyCartesianSpeedLimit(
+    MoveGroupInterface & move_group,
+    moveit_msgs::msg::RobotTrajectory & trajectory,
+    const std::string & stage)
+  {
+    const double max_speed = node_->get_parameter("max_cartesian_speed").as_double();
+    if (max_speed <= 0.0) {
+      RCLCPP_WARN(
+        node_->get_logger(),
+        "%s: max_cartesian_speed<=0, Cartesian speed limit disabled.",
+        stage.c_str());
+      return true;
+    }
+
+    auto & joint_trajectory = trajectory.joint_trajectory;
+    if (joint_trajectory.points.empty()) {
+      RCLCPP_ERROR(node_->get_logger(), "%s trajectory has no points.", stage.c_str());
+      return false;
+    }
+
+    const std::string link_name = node_->get_parameter("cartesian_speed_link").as_string();
+    const auto robot_model = move_group.getRobotModel();
+    if (!robot_model) {
+      RCLCPP_ERROR(node_->get_logger(), "Unable to get robot model for Cartesian speed limit.");
+      return false;
+    }
+
+    const moveit::core::LinkModel * link_model = robot_model->getLinkModel(link_name);
+    if (!link_model) {
+      RCLCPP_ERROR(
+        node_->get_logger(),
+        "Cartesian speed link %s was not found in the robot model.",
+        link_name.c_str());
+      return false;
+    }
+
+    moveit::core::RobotStatePtr current_state = move_group.getCurrentState(2.0);
+    if (!current_state) {
+      RCLCPP_ERROR(node_->get_logger(), "Unable to get current robot state for speed limit.");
+      return false;
+    }
+
+    moveit::core::RobotState state(*current_state);
+    state.update();
+    Eigen::Vector3d previous_position = state.getGlobalLinkTransform(link_model).translation();
+    double previous_limited_time = 0.0;
+    double max_observed_speed = 0.0;
+
+    for (auto & point : joint_trajectory.points) {
+      if (point.positions.size() != joint_trajectory.joint_names.size()) {
+        RCLCPP_ERROR(
+          node_->get_logger(),
+          "%s trajectory point has %zu positions for %zu joints.",
+          stage.c_str(),
+          point.positions.size(),
+          joint_trajectory.joint_names.size());
+        return false;
+      }
+
+      for (std::size_t i = 0; i < joint_trajectory.joint_names.size(); ++i) {
+        state.setVariablePosition(joint_trajectory.joint_names[i], point.positions[i]);
+      }
+      state.update();
+
+      const Eigen::Vector3d current_position =
+        state.getGlobalLinkTransform(link_model).translation();
+      const double segment_distance = (current_position - previous_position).norm();
+      const double original_time = durationToSeconds(point.time_from_start);
+      const double minimum_time = previous_limited_time + segment_distance / max_speed;
+      const double limited_time = std::max(original_time, minimum_time);
+
+      if (limited_time > original_time + 1.0e-9) {
+        point.time_from_start = rclcpp::Duration::from_seconds(limited_time);
+        point.velocities.clear();
+        point.accelerations.clear();
+        point.effort.clear();
+      }
+
+      const double dt = limited_time - previous_limited_time;
+      if (dt > 1.0e-9) {
+        max_observed_speed = std::max(max_observed_speed, segment_distance / dt);
+      }
+
+      previous_position = current_position;
+      previous_limited_time = limited_time;
+    }
+
+    RCLCPP_INFO(
+      node_->get_logger(),
+      "%s: applied Cartesian speed limit link=%s max_speed=%.4f m/s final_duration=%.3f s max_segment_speed=%.4f m/s.",
+      stage.c_str(),
+      link_name.c_str(),
+      max_speed,
+      previous_limited_time,
+      max_observed_speed);
+    return true;
   }
 
   bool planAndMaybeExecuteInsert(

@@ -1,0 +1,76 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <link name="screwdriver_tool_link">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.05"/>
+      <inertia ixx="0.00001" ixy="0" ixz="0" iyy="0.00001" iyz="0" izz="0.00001"/>
+    </inertial>
+
+    <visual>
+      <origin xyz="0 0 0" rpy="0 3.141592653589793 0"/>
+      <geometry>
+        <mesh filename="file://$(find ur5e_custom_tool_description)/meshes/Screwdriver.stl"
+              scale="0.001 0.001 0.001"/>
+      </geometry>
+      <material name="screwdriver_tool_dark">
+        <color rgba="0.45 0.43 0.38 1.0"/>
+      </material>
+    </visual>
+
+    <!--
+      MoveIt treats this fixed child link as colliding with wrist_3_link if the
+      full STL is also used as collision geometry. The project uses a custom
+      contour safety node for blade/bone safety checks, so this link keeps only
+      visual + inertial geometry for planning.
+    -->
+  </link>
+
+  <joint name="tool0_to_screwdriver_tool" type="fixed">
+    <parent link="wrist_3_link"/>
+    <child link="screwdriver_tool_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <link name="blade_center_link">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.001"/>
+      <inertia ixx="0.00000001" ixy="0" ixz="0" iyy="0.00000001" iyz="0" izz="0.00000001"/>
+    </inertial>
+
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.003"/>
+      </geometry>
+      <material name="blade_center_red">
+        <color rgba="1.0 0.05 0.02 1.0"/>
+      </material>
+    </visual>
+  </link>
+
+  <joint name="screwdriver_tool_to_blade_center" type="fixed">
+    <parent link="screwdriver_tool_link"/>
+    <child link="blade_center_link"/>
+    <origin xyz="0 -0.115 0.075" rpy="0 0 0"/>
+  </joint>
+
+  <gazebo reference="tool0_to_screwdriver_tool">
+    <preserveFixedJoint>true</preserveFixedJoint>
+  </gazebo>
+
+  <gazebo reference="screwdriver_tool_to_blade_center">
+    <preserveFixedJoint>true</preserveFixedJoint>
+  </gazebo>
+
+  <gazebo reference="screwdriver_tool_link">
+    <material>Gazebo/DarkGrey</material>
+  </gazebo>
+
+  <gazebo reference="blade_center_link">
+    <material>Gazebo/Red</material>
+  </gazebo>
+
+</robot>

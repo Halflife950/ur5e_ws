@@ -1366,6 +1366,12 @@ ros2 param get /move_group robot_description_kinematics
 
 # IV. Git 团队协作建议
 
+远端仓库：
+
+```text
+https://github.com/Halflife950/ur5e_ws
+```
+
 本仓库建议只提交源码、配置、路径文件、图片和 README，不提交本机编译产物。
 
 已经通过 `.gitignore` 忽略：
@@ -1383,7 +1389,7 @@ __pycache__/
 
 ```bash
 cd ~/ur5e_ws
-git remote add origin <你的远端仓库地址>
+git remote add origin https://github.com/Halflife950/ur5e_ws.git
 git push -u origin main
 ```
 
@@ -1391,15 +1397,15 @@ git push -u origin main
 
 ```bash
 git status
-git add README.md src/ur5e_curve_path src/ur5e_cartesian_motion
-git commit -m "Update real robot setup notes"
+git add README.md src/ur5e_blade_safety src/ur5e_custom_tool_description
+git commit -m "Update blade safety documentation"
 git push
 ```
 
 队友拉取：
 
 ```bash
-git clone <仓库地址> ~/ur5e_ws
+git clone https://github.com/Halflife950/ur5e_ws.git ~/ur5e_ws
 cd ~/ur5e_ws
 source /opt/ros/humble/setup.bash
 colcon build --symlink-install --executor sequential --parallel-workers 1
@@ -1419,4 +1425,4 @@ ros2 pkg prefix ur_client_library
 
 ---
 
-最近维护日期：2026年7月6日
+最近维护日期：2026年7月9日

@@ -1,0 +1,156 @@
+# Central tuning file for the current UR5e blade insertion workflow.
+#
+# Prefer editing this file during experiments. The older per-node yaml files were
+# removed so there is only one tuning source for the current launch flow.
+
+opening_alignment_planner:
+  ros__parameters:
+    # Frames and contour input
+    base_frame: base_link
+    blade_frame: blade_center_link
+    contour_csv: data/cavity_contour.csv
+    csv_scale: 0.001
+
+    # Target generation
+    pre_offset: 0.06
+    insert_depth: 0.02
+    contour_z: 0.20
+    target_z: 0.20
+    tool_z_axis_down: true
+    blade_shaft_axis: minus_y
+
+    # Marker publishing
+    publish_period_ms: 100.0
+    line_width: 0.004
+    contour_line_width: 0.004
+    endpoint_radius: 0.012
+    target_radius: 0.012
+
+    # Open contour shell visualization
+    shell_bottom_z: 0.0
+    shell_height: 0.40
+    shell_edge_width: 0.003
+    shell_wall_alpha: 0.10
+
+blade_contour_safety:
+  ros__parameters:
+    # Frames and contour input
+    base_frame: base_link
+    blade_frame: blade_center_link
+    contour_csv: data/cavity_contour.csv
+    csv_scale: 0.001
+    contour_z: 0.20
+
+    # Blade fan geometry and 2D cross-section safety threshold
+    safety_margin: 0.006
+    blade_radius: 0.005
+    blade_angle_deg: 47.2
+    blade_sample_spacing: 0.0005
+    blade_yaw_offset_deg: 0.0
+
+    # Dynamic detection periods
+    danger_distance: 0.006
+    base_timer_period_ms: 2.0
+    idle_publish_period_ms: 2.0
+    moving_publish_period_ms: 2.0
+    insert_publish_period_ms: 2.0
+    danger_publish_period_ms: 2.0
+
+    # Terminal timing log
+    enable_timing_log: true
+    timing_log_period_s: 0.5
+
+    # Debug marker publisher. RViz currently uses /opening_alignment_markers.
+    publish_markers: false
+    marker_publish_period_ms: 50.0
+    boundary_line_width: 0.004
+    sample_radius: 0.006
+    danger_radius: 0.025
+
+blade_motion_safety_interlock:
+  ros__parameters:
+    safety_topic: /blade_contour_safe
+    min_distance_topic: /blade_contour_min_distance
+    trajectory_action: /joint_trajectory_controller/follow_joint_trajectory
+    cancel_trajectory_on_unsafe: true
+    log_transition_only: true
+    action_server_wait_s: 0.0
+
+cartesian_forward_probe:
+  ros__parameters:
+    move_group_name: ur_manipulator
+    base_frame: base_link
+    end_effector_link: tool0
+    blade_frame: blade_center_link
+    blade_forward_axis: minus_y
+    cartesian_distance: 0.35
+    planning_time_s: 10.0
+    planning_attempts: 5
+    velocity_scaling: 0.03
+    acceleration_scaling: 0.03
+    max_cartesian_speed: 0.02
+    cartesian_speed_link: blade_center_link
+    cartesian_eef_step: 0.002
+    cartesian_jump_threshold: 0.0
+    min_cartesian_fraction: 0.95
+    tf_wait_timeout_s: 5.0
+    start_delay_s: 1.0
+    execute_motion: true
+
+opening_insert_executor:
+  ros__parameters:
+    # Frames and target topics
+    move_group_name: ur_manipulator
+    base_frame: base_link
+    end_effector_link: tool0
+    blade_frame: blade_center_link
+    preinsert_topic: /blade_preinsert_pose
+    insert_topic: /blade_insert_pose
+    safety_topic: /blade_contour_safe
+    min_distance_topic: /blade_contour_min_distance
+
+    # Contour-prism plan validation
+    contour_csv: data/cavity_contour.csv
+    csv_scale: 0.001
+    reject_preinsert_plan_inside_contour: true
+    valid_preinsert_plan_attempts: 5
+
+    # Three-stage motion: joint plan to approach, Cartesian to pre-insert,
+    # Cartesian to insert.
+    approach_extra_offset: 0.08
+    planning_time_s: 10.0
+    planning_attempts: 10
+    velocity_scaling: 0.05
+    acceleration_scaling: 0.05
+    preinsert_ik_timeout_s: 0.2
+    cartesian_eef_step: 0.002
+    cartesian_jump_threshold: 0.0
+    min_cartesian_fraction: 0.95
+
+    # Preferred IK seed, used to keep the approach configuration stable.
+    use_preferred_ik_seed: true
+    preferred_shoulder_pan_joint: 0.0
+    preferred_shoulder_lift_joint: -1.2217305
+    preferred_elbow_joint: 1.8849556
+    preferred_wrist_1_joint: -2.2165682
+    preferred_wrist_2_joint: -1.5533430
+    preferred_wrist_3_joint: 0.0
+
+    # Runtime behavior
+    pose_wait_timeout_s: 0.0
+    tf_wait_timeout_s: 5.0
+    execute_motion: true
+    execute_insert_stage: false
+
+    # Executor-local safety gates for initialization to pre-insert.
+    # Runtime interruption of arbitrary motion is handled by
+    # blade_motion_safety_interlock.
+    require_safety_status_before_motion: true
+    require_safe_before_approach: true
+    require_safe_before_preinsert: true
+    abort_on_unsafe: true
+    stop_on_unsafe: true
+    safety_wait_timeout_s: 3.0
+    segment_check_before_execute: true
+    segment_check_after_execute: true
+    allow_continue_after_unsafe: false

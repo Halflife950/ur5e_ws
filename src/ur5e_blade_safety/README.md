@@ -104,6 +104,45 @@ src/ur5e_blade_safety/config/blade_task_tuning.yaml
 
 ## 4. 启动顺序
 
+推荐的一键初始化入口：
+
+```bash
+cd ~/ur5e_ws
+./scripts/launch_blade_preinsert_stack.sh
+```
+
+该脚本会自动执行前三步：
+
+```text
+1. 打开 Gazebo + MoveIt + RViz 终端
+2. 等待 /move_group、/joint_states 和 joint trajectory action 就绪
+3. 打开 opening_monitor.launch.py 终端
+4. 等待目标 pose 和安全 topic 就绪
+5. 打开 opening_insert_executor.launch.py 终端，把机器人初始化到 pre-insert
+```
+
+它会打开多个 `gnome-terminal` 窗口，方便分别检查：
+
+```text
+Gazebo / MoveIt / RViz 日志
+opening_monitor.launch.py 日志
+opening_insert_executor 初始化过程
+```
+
+等 insert executor 终端显示已经到达 pre-insert 后，再另开一个终端执行最后的外部运动，例如：
+
+```bash
+cd ~/ur5e_ws
+source install/setup.bash
+ros2 launch ur5e_blade_safety cartesian_forward_probe.launch.py
+```
+
+如果不用一键脚本，也可以按下面的分终端方式手动启动。
+
+自动化脚本只负责顺序拉起前三步，不额外启动状态监视窗口。
+
+手动分终端启动方式如下。
+
 终端 1：启动 Gazebo、MoveIt 和 RViz。
 
 ```bash

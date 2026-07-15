@@ -14,11 +14,12 @@ https://github.com/Halflife950/ur5e_ws
 
 ```text
 初始化链路：
-  自动识别开口
-  生成 pre-insert 目标
-  MoveIt 将机器人运动到 pre-insert
+  自动识别开口（仅用于当前仿真初始化）
+  生成 approach 和 pre-insert 目标
+  可选执行简单对齐运动到 pre-insert
 
 安全联锁链路：
+  读取相对 base_link 固定的目标轮廓曲线
   持续检测 blade_center_link 扇形刀刃截面到轮廓边界的最小距离
   发布 safe / unsafe
   独立节点在 unsafe 时 cancel 当前 FollowJointTrajectory action
@@ -27,18 +28,39 @@ https://github.com/Halflife950/ur5e_ws
 这样做的目的：
 
 ```text
-opening_insert_executor 只负责初始化到 pre-insert
-后续插入或其他运动可以由任意程序执行
+opening_alignment_planner 只负责发布目标位姿和 RViz 标记
+opening_alignment_executor 可消费这两个目标并执行仿真对齐
+后续插入或其他运动仍可以由任意程序执行
 blade_motion_safety_interlock 独立监督并中断控制器轨迹
+真实操作平台上，轮廓坐标已知且相对机械臂原点不动时，可以只启动检测和联锁链路
 ```
+
+轮廓读取和基础几何现在集中在公共模块：
+
+```text
+include/ur5e_blade_safety/contour_model.hpp
+src/contour_model.cpp
+```
+
+该模块负责：
+
+```text
+读取 data/cavity_contour.csv
+将轮廓固定到配置的 contour_z
+识别最大 gap 作为开口
+生成不包含开口边的 wall segments
+提供刀刃采样点到轮廓边界的 2D 最小距离计算
+```
+
+`opening_alignment_planner` 和 `blade_contour_safety` 都复用这份轮廓模型；前者只是仿真里生成初始化目标，后者才是可独立运行的检测节点。
 
 ## 2. 当前核心节点
 
 ```text
 opening_alignment_planner
+opening_alignment_executor
 blade_contour_safety
 blade_motion_safety_interlock
-opening_insert_executor
 cartesian_forward_probe
 ```
 
@@ -46,12 +68,18 @@ cartesian_forward_probe
 
 ```text
 opening_alignment_planner:
-  读取 data/cavity_contour.csv
-  识别唯一开口
-  发布 /blade_preinsert_pose 和 /blade_insert_pose
+  复用公共 contour_model
+  识别唯一开口并生成仿真初始化目标
+  发布 /blade_approach_pose 和 /blade_preinsert_pose
   发布 /opening_alignment_markers
 
+opening_alignment_executor:
+  订阅 /blade_approach_pose 和 /blade_preinsert_pose
+  将 blade_center_link 目标换算成 tool0 目标
+  默认用 IK 求 approach / pre-insert 关节角并直接发送 joint trajectory
+
 blade_contour_safety:
+  复用公共 contour_model 读取固定轮廓
   根据当前 base_link -> blade_center_link TF 动态检测刀刃是否接近轮廓边界
   发布 /blade_contour_safe
   发布 /blade_contour_min_distance
@@ -61,12 +89,6 @@ blade_motion_safety_interlock:
   订阅 /blade_contour_safe 和 /blade_contour_min_distance
   unsafe 时 cancel 配置的 FollowJointTrajectory action 的所有 active goals
   与具体运动程序解耦
-
-opening_insert_executor:
-  等待 pre-insert / insert target pose
-  将 blade_center_link 目标反算为 tool0 目标
-  执行 approach -> pre-insert 初始化
-  默认不执行 insert 阶段
 
 cartesian_forward_probe:
   测试节点
@@ -78,20 +100,22 @@ cartesian_forward_probe:
 
 ```text
 src/ur5e_blade_safety/src/opening_alignment_planner.cpp
+src/ur5e_blade_safety/src/opening_alignment_executor.cpp
 src/ur5e_blade_safety/src/blade_contour_safety.cpp
 src/ur5e_blade_safety/src/blade_motion_safety_interlock.cpp
-src/ur5e_blade_safety/src/opening_insert_executor.cpp
 src/ur5e_blade_safety/src/cartesian_forward_probe.cpp
 
 src/ur5e_blade_safety/config/blade_task_tuning.yaml
 
 src/ur5e_blade_safety/launch/opening_monitor.launch.py
-src/ur5e_blade_safety/launch/opening_insert_executor.launch.py
+src/ur5e_blade_safety/launch/opening_alignment_executor.launch.py
 src/ur5e_blade_safety/launch/cartesian_forward_probe.launch.py
 
 src/ur5e_blade_safety/rviz/blade_monitor.rviz
 
 scripts/launch_ur5e_gazebo_gui.sh
+scripts/launch_blade_preinsert_stack.sh
+scripts/launch_blade_safety_monitor.sh
 ```
 
 主调参文件：
@@ -104,6 +128,42 @@ src/ur5e_blade_safety/config/blade_task_tuning.yaml
 
 ## 4. 启动顺序
 
+真实平台上，如果轮廓坐标已经由前序流程确定，并且机械臂对准/运动由其他终端或其他操作员执行，只启动安全检测和联锁即可：
+
+```bash
+cd ~/ur5e_ws
+./scripts/launch_blade_safety_monitor.sh
+```
+
+该脚本会启动：
+
+```text
+blade_contour_safety
+blade_motion_safety_interlock
+```
+
+并且会显式关闭：
+
+```text
+opening_alignment_planner
+opening_alignment_executor
+```
+
+默认 `USE_SIM_TIME=false`。如果仍在仿真中只想测试检测链路，可以这样运行：
+
+```bash
+USE_SIM_TIME=true ./scripts/launch_blade_safety_monitor.sh
+```
+
+只针对 `blade_contour_safety` 检测节点本身，在轮廓坐标、frame 名称和刀具模型一致的前提下，仿真和真实平台的启动差异基本只有 `use_sim_time`：
+
+```text
+仿真：use_sim_time=true，使用 Gazebo /clock
+真实：use_sim_time=false，使用系统时间
+```
+
+检测节点看到的输入始终是 `base_link -> blade_center_link` TF 和固定轮廓；这些输入来自 Gazebo 还是真实 UR driver，对节点内部算法没有区别。
+
 推荐的一键初始化入口：
 
 ```bash
@@ -111,14 +171,14 @@ cd ~/ur5e_ws
 ./scripts/launch_blade_preinsert_stack.sh
 ```
 
-该脚本会自动执行前三步：
+该脚本会自动执行以下步骤：
 
 ```text
 1. 打开 Gazebo + MoveIt + RViz 终端
 2. 等待 /move_group、/joint_states 和 joint trajectory action 就绪
 3. 打开 opening_monitor.launch.py 终端
-4. 等待目标 pose 和安全 topic 就绪
-5. 打开 opening_insert_executor.launch.py 终端，把机器人初始化到 pre-insert
+4. 等待 approach / pre-insert 目标 pose 和安全 topic 就绪
+5. 打开 opening_alignment_executor.launch.py 终端，执行到 pre-insert
 ```
 
 它会打开多个 `gnome-terminal` 窗口，方便分别检查：
@@ -126,10 +186,10 @@ cd ~/ur5e_ws
 ```text
 Gazebo / MoveIt / RViz 日志
 opening_monitor.launch.py 日志
-opening_insert_executor 初始化过程
+opening_alignment_executor.launch.py 日志
 ```
 
-等 insert executor 终端显示已经到达 pre-insert 后，再另开一个终端执行最后的外部运动，例如：
+到达 pre-insert 后，可以再另开一个终端执行后续外部运动，例如：
 
 ```bash
 cd ~/ur5e_ws
@@ -139,7 +199,7 @@ ros2 launch ur5e_blade_safety cartesian_forward_probe.launch.py
 
 如果不用一键脚本，也可以按下面的分终端方式手动启动。
 
-自动化脚本只负责顺序拉起前三步，不额外启动状态监视窗口。
+自动化脚本只负责顺序拉起初始化和对齐，不额外启动状态监视窗口。
 
 手动分终端启动方式如下。
 
@@ -167,7 +227,7 @@ GAZEBO_MASTER_URI=http://127.0.0.1:11346 ./scripts/launch_ur5e_gazebo_gui.sh
 ```bash
 cd ~/ur5e_ws
 source install/setup.bash
-ros2 launch ur5e_blade_safety opening_monitor.launch.py
+ros2 launch ur5e_blade_safety opening_monitor.launch.py use_sim_time:=true enable_alignment:=true enable_interlock:=true
 ```
 
 该 launch 启动：
@@ -178,21 +238,18 @@ blade_contour_safety
 blade_motion_safety_interlock
 ```
 
-终端 3：初始化到 pre-insert。
+如果只需要检测和联锁，不需要仿真初始化目标：
+
+```bash
+ros2 launch ur5e_blade_safety opening_monitor.launch.py use_sim_time:=false enable_alignment:=false enable_interlock:=true
+```
+
+终端 3：执行简单对齐，到达 pre-insert。
 
 ```bash
 cd ~/ur5e_ws
 source install/setup.bash
-ros2 launch ur5e_blade_safety opening_insert_executor.launch.py
-```
-
-默认行为：
-
-```text
-执行 approach
-执行 approach -> pre-insert
-到达 pre-insert 后停止
-不执行 insert
+ros2 launch ur5e_blade_safety opening_alignment_executor.launch.py use_sim_time:=true
 ```
 
 终端 4：可选，执行向前直线测试。
@@ -218,9 +275,12 @@ forward probe 终端显示运动未完整成功，这属于预期
 
 ```text
 /blade_preinsert_pose
-/blade_insert_pose
+/blade_approach_pose
 /opening_alignment_markers
+/blade_contour_safety_markers
 ```
+
+`/opening_alignment_markers` 来自 `opening_alignment_planner`。`/blade_contour_safety_markers` 来自 `blade_contour_safety`，在 `launch_blade_safety_monitor.sh` 中默认开启，用于不启动 alignment planner 时仍显示静态轮廓。
 
 安全检测：
 
@@ -259,11 +319,13 @@ RViz 配置：
 src/ur5e_blade_safety/rviz/blade_monitor.rviz
 ```
 
-当前只配置一个 MarkerArray 显示：
+当前配置两个 MarkerArray 显示：
 
 ```text
 Topic: /opening_alignment_markers
 Namespace: opening_alignment
+Topic: /blade_contour_safety_markers
+Namespace: blade_contour_safety
 ```
 
 显示内容：
@@ -275,6 +337,7 @@ Namespace: opening_alignment
 白色线：识别出的开口
 黄色端点：开口两端
 橙色点：开口中心
+浅蓝色点：approach 目标
 绿色点：pre-insert 目标
 ```
 
@@ -303,7 +366,7 @@ data/cavity_contour.csv
 
 ```text
 /blade_preinsert_pose
-/blade_insert_pose
+/blade_approach_pose
 /opening_alignment_markers
 ```
 
@@ -314,7 +377,7 @@ data/cavity_contour.csv
 2. 找相邻点最大 gap 作为唯一开口
 3. 开口段不作为实体边界
 4. 计算开口中心、外侧方向、插入方向
-5. 生成 blade_center_link 的 pre-insert 和 insert pose
+5. 生成 blade_center_link 的 approach 和 pre-insert pose
 6. 发布简化后的 RViz marker
 ```
 
@@ -322,7 +385,7 @@ data/cavity_contour.csv
 
 ```yaml
 pre_offset: 0.06
-insert_depth: 0.02
+approach_offset: 0.08
 contour_z: 0.20
 target_z: 0.20
 blade_shaft_axis: minus_y
@@ -330,9 +393,57 @@ shell_bottom_z: 0.0
 shell_height: 0.40
 ```
 
-虽然 RViz 不再显示 insert 点，`/blade_insert_pose` 仍然保留，供后续外部运动程序使用。
+后续外部运动程序可以直接消费 `/blade_approach_pose` 和 `/blade_preinsert_pose`。
 
-## 8. blade_contour_safety
+## 8. opening_alignment_executor
+
+输入：
+
+```text
+/blade_approach_pose
+/blade_preinsert_pose
+/joint_states
+tool0 -> blade_center_link TF
+```
+
+执行逻辑：
+
+```text
+1. 等待 approach 和 pre-insert 两个 blade_center_link 目标
+2. 查询 tool0 到 blade_center_link 的固定 TF
+3. 将 blade_center_link 目标换算成 tool0 目标
+4. 从 /joint_states 读取当前关节角作为轨迹起点
+5. 用 curve path 预设关节角作为 approach IK seed
+6. 用 approach 解作为 pre-insert IK seed
+7. 直接向 FollowJointTrajectory action 发送 current -> approach -> pre-insert 轨迹
+```
+
+常用参数：
+
+```yaml
+move_group_name: ur_manipulator
+end_effector_link: tool0
+blade_frame: blade_center_link
+joint_state_topic: /joint_states
+trajectory_action: /joint_trajectory_controller/follow_joint_trajectory
+use_direct_joint_trajectory: true
+use_preferred_ik_seed: true
+preferred_shoulder_pan_joint: 0.0
+preferred_shoulder_lift_joint: -1.2217305
+preferred_elbow_joint: 1.8849556
+preferred_wrist_1_joint: -2.2165682
+preferred_wrist_2_joint: -1.5533430
+preferred_wrist_3_joint: 0.0
+ik_timeout_s: 0.2
+approach_duration_s: 6.0
+preinsert_duration_s: 3.0
+joint_state_wait_timeout_s: 5.0
+execute_motion: true
+```
+
+它不执行最终插入，只把机器人带到 pre-insert。direct 模式直接使用最新 `/joint_states` 作为轨迹起点，不依赖 MoveIt current state monitor 对时间戳的 recent 检查。`use_preferred_ik_seed: true` 时，approach IK 会优先贴近 curve path 的稳定预设姿态。`execute_motion: false` 时只求 IK 并打印关节角，不发送轨迹。`use_direct_joint_trajectory: false` 可以临时回到旧的 MoveIt pose/cartesian 规划方式做对比。
+
+## 9. blade_contour_safety
 
 输出：
 
@@ -365,7 +476,7 @@ polyline 版本简单、可验证、速度足够
 常用参数：
 
 ```yaml
-safety_margin: 0.003
+safety_margin: 0.006
 danger_distance: 0.006
 blade_radius: 0.005
 blade_angle_deg: 47.2
@@ -395,13 +506,15 @@ blade_center_link 局部截面内生成扇形采样点
 所有采样点中的最小值作为 /blade_contour_min_distance
 ```
 
-debug marker publisher 仍在代码中保留，但当前默认关闭：
+静态轮廓 marker publisher 当前默认关闭，避免在完整 alignment stack 中和 `/opening_alignment_markers` 重复；`launch_blade_safety_monitor.sh` 会在单独检测时覆盖为开启：
 
 ```yaml
 publish_markers: false
 ```
 
-## 9. blade_motion_safety_interlock
+该 marker publisher 只发布壳体、边界、开口线和开口端点；早期的刀刃采样点、危险点和文字等动态调试 marker 已移除。
+
+## 10. blade_motion_safety_interlock
 
 文件：
 
@@ -457,60 +570,6 @@ safe 重新变 true 后，下一次 unsafe 仍可再次触发 cancel
 ```text
 /scaled_joint_trajectory_controller/follow_joint_trajectory
 ```
-
-## 10. opening_insert_executor
-
-文件：
-
-```text
-src/ur5e_blade_safety/src/opening_insert_executor.cpp
-```
-
-当前默认用途：
-
-```text
-将机器人初始化到 pre-insert
-不执行后续 insert
-```
-
-流程：
-
-```text
-1. 等待 /blade_preinsert_pose 和 /blade_insert_pose
-2. 等待 /blade_contour_safe
-3. 查询 tool0 -> blade_center_link 固定 TF
-4. 将 blade_center_link 的 approach / pre-insert 目标反算为 tool0 目标
-5. 用 preferred IK seed 规划 approach
-6. 静态验证 approach plan 中 blade_center_link 不进入轮廓柱体
-7. 执行 approach
-8. Cartesian 执行 approach -> pre-insert
-9. execute_insert_stage=false 时停止
-```
-
-关键参数：
-
-```yaml
-execute_motion: true
-execute_insert_stage: false
-require_safety_status_before_motion: true
-require_safe_before_approach: true
-require_safe_before_preinsert: true
-approach_extra_offset: 0.08
-velocity_scaling: 0.05
-acceleration_scaling: 0.05
-max_cartesian_speed: 0.02
-cartesian_speed_link: blade_center_link
-```
-
-说明：
-
-```text
-executor 内仍保留一些旧的安全检查和 insert 执行代码路径
-但当前 tuning 文件只暴露初始化到 pre-insert 所需参数
-运行时任意外部运动的中断交给 blade_motion_safety_interlock
-```
-
-`max_cartesian_speed` 会对 executor 内部的 Cartesian 轨迹做重定时，当前主要限制 `approach -> pre-insert` 段的刀头线速度。默认用 `blade_center_link` 作为限速参考点，避免接近 pre-insert 时运动过快。
 
 ## 11. cartesian_forward_probe
 
@@ -568,9 +627,16 @@ joint_state_broadcaster active
 joint_trajectory_controller active
 /joint_states 正常发布
 opening_monitor.launch.py 启动目标生成、动态检测、安全联锁
-opening_insert_executor.launch.py 默认初始化到 pre-insert
 cartesian_forward_probe 可触发长距离 Cartesian 测试
 unsafe 后 interlock 能 cancel 控制器轨迹
+```
+
+当前代码层面已编译通过：
+
+```text
+opening_alignment_executor 使用 /joint_states 作为轨迹起点
+opening_alignment_executor 使用 preferred IK seed 生成 approach / pre-insert 关节目标
+blade_contour_safety 单独检测时可发布静态轮廓 marker
 ```
 
 已知注意点：
@@ -685,7 +751,7 @@ n1 / n2: 开口线的两个法向
 outward_dir: 更朝向 base_link 原点的一侧
 insert_dir = -outward_dir
 pre_center = M + outward_dir * pre_offset
-inside_center = M - outward_dir * insert_depth
+approach_center = pre_center + outward_dir * approach_offset
 ```
 
 姿态规则：
@@ -703,73 +769,16 @@ blade_shaft_axis: minus_y
 
 必要时改成 `plus_y`。
 
-### 13.4 MoveIt 执行目标反算
-
-MoveIt 当前规划组：
-
-```text
-group: ur_manipulator
-chain: base_link -> tool0
-```
-
-`blade_center_link` 不直接作为 MoveIt tip，因此 executor 使用固定 TF 反算：
-
-```text
-T_base_tool0_target = T_base_blade_target * inverse(T_tool0_blade)
-```
-
-这样 MoveIt 控制 `tool0`，但最终让 `blade_center_link` 到达 pre-insert 目标。
-
-当前 preferred IK seed 来自早期 curve path demo 的稳定姿态，用于减少 IK 多解导致的上下翻转和绕路：
-
-```yaml
-preferred_shoulder_pan_joint: 0.0
-preferred_shoulder_lift_joint: -1.2217305
-preferred_elbow_joint: 1.8849556
-preferred_wrist_1_joint: -2.2165682
-preferred_wrist_2_joint: -1.5533430
-preferred_wrist_3_joint: 0.0
-```
-
-如果 `tool0 -> blade_center_link` 查不到，优先检查：
-
-```bash
-ros2 run tf2_ros tf2_echo tool0 blade_center_link
-```
-
-### 13.5 Approach 与禁入区验证
-
-Step 6 后，初始化不再直接规划到 pre-insert，而是：
-
-```text
-1. 根据 pre-insert 和 insert 连线生成更外侧的 approach 点
-2. 对 approach 使用 IK + MoveIt joint plan
-3. 对 plan 逐点正解 blade_center_link
-4. 检查 blade_center_link 是否进入由轮廓 XY 拉伸出的柱状禁入区
-5. 若进入禁入区，则拒绝该 plan 并重新规划
-6. approach -> pre-insert 使用 Cartesian 直线
-7. execute_insert_stage=false 时在 pre-insert 停止
-```
-
-关键参数：
-
-```yaml
-reject_preinsert_plan_inside_contour: true
-valid_preinsert_plan_attempts: 5
-approach_extra_offset: 0.08
-execute_insert_stage: false
-```
-
-### 13.6 RViz 与 Gazebo 注意事项
+### 13.4 RViz 与 Gazebo 注意事项
 
 RViz 建议：
 
 ```text
 Fixed Frame = base_link
-MarkerArray topic = /opening_alignment_markers
+MarkerArray topics = /opening_alignment_markers, /blade_contour_safety_markers
 ```
 
-当前 RViz 只保留一个 MarkerArray，避免旧调试 marker 重复显示。历史上的箭头、insert 点、文字、采样点和最近危险点都已移除或默认关闭。
+当前 RViz 保留 alignment 与 safety 两个 MarkerArray。历史上的箭头、insert 点、文字、采样点和最近危险点都已移除或默认关闭。
 
 Gazebo 注意事项：
 

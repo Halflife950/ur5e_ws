@@ -1,15 +1,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <fstream>
 #include <limits>
 #include <memory>
-#include <sstream>
-#include <stdexcept>
 #include <string>
 #include <vector>
 
-#include "ament_index_cpp/get_package_share_directory.hpp"
 #include "geometry_msgs/msg/point.hpp"
 #include "geometry_msgs/msg/point_stamped.hpp"
 #include "geometry_msgs/msg/transform_stamped.hpp"
@@ -22,36 +18,18 @@
 #include "tf2/LinearMath/Vector3.h"
 #include "tf2_ros/buffer.h"
 #include "tf2_ros/transform_listener.h"
+#include "ur5e_blade_safety/contour_model.hpp"
 #include "visualization_msgs/msg/marker.hpp"
 #include "visualization_msgs/msg/marker_array.hpp"
 
 using namespace std::chrono_literals;
 
-struct Vec2
-{
-  double x;
-  double y;
-};
-
-struct Vec3
-{
-  double x;
-  double y;
-  double z;
-};
-
-struct Segment
-{
-  Vec3 a;
-  Vec3 b;
-};
-
-struct DistanceResult
-{
-  double distance;
-  Vec3 sample_point;
-  Vec3 closest_boundary_point;
-};
+using ur5e_blade_safety::computeMinimumDistance;
+using ur5e_blade_safety::ContourModel;
+using ur5e_blade_safety::DistanceResult;
+using ur5e_blade_safety::loadFixedContourModel;
+using ur5e_blade_safety::Vec2;
+using ur5e_blade_safety::Vec3;
 
 struct DetectionResult
 {
@@ -87,12 +65,16 @@ public:
     declare_parameter<bool>("publish_markers", true);
     declare_parameter<double>("marker_publish_period_ms", 50.0);
     declare_parameter<double>("boundary_line_width", 0.004);
-    declare_parameter<double>("sample_radius", 0.006);
-    declare_parameter<double>("danger_radius", 0.025);
+    declare_parameter<double>("opening_line_width", 0.004);
+    declare_parameter<double>("shell_bottom_z", 0.0);
+    declare_parameter<double>("shell_height", 0.25);
+    declare_parameter<double>("shell_edge_width", 0.003);
+    declare_parameter<double>("shell_wall_alpha", 0.18);
+    declare_parameter<double>("endpoint_radius", 0.025);
 
     base_frame_ = get_parameter("base_frame").as_string();
     blade_frame_ = get_parameter("blade_frame").as_string();
-    contour_csv_ = resolvePackagePath(get_parameter("contour_csv").as_string());
+    contour_csv_ = get_parameter("contour_csv").as_string();
     contour_z_ = get_parameter("contour_z").as_double();
     safety_margin_ = get_parameter("safety_margin").as_double();
     danger_distance_ = get_parameter("danger_distance").as_double();
@@ -106,13 +88,17 @@ public:
     publish_markers_ = get_parameter("publish_markers").as_bool();
     marker_publish_period_ms_ = get_parameter("marker_publish_period_ms").as_double();
     boundary_line_width_ = get_parameter("boundary_line_width").as_double();
-    sample_radius_ = get_parameter("sample_radius").as_double();
-    danger_radius_ = get_parameter("danger_radius").as_double();
+    opening_line_width_ = get_parameter("opening_line_width").as_double();
+    shell_bottom_z_ = get_parameter("shell_bottom_z").as_double();
+    shell_height_ = get_parameter("shell_height").as_double();
+    shell_edge_width_ = get_parameter("shell_edge_width").as_double();
+    shell_wall_alpha_ = get_parameter("shell_wall_alpha").as_double();
+    endpoint_radius_ = get_parameter("endpoint_radius").as_double();
 
-    contour_points_ = loadCsv(contour_csv_, get_parameter("csv_scale").as_double());
-    forceContourZ(contour_points_);
-    gap_index_ = findLargestGap(contour_points_);
-    segments_ = makeSegments(contour_points_, gap_index_);
+    contour_model_ = loadFixedContourModel(
+      contour_csv_,
+      get_parameter("csv_scale").as_double(),
+      contour_z_);
     blade_samples_local_ = makeBladeSamples();
 
     safe_pub_ = create_publisher<std_msgs::msg::Bool>("blade_contour_safe", 10);
@@ -137,11 +123,11 @@ public:
     RCLCPP_INFO(
       get_logger(),
       "Loaded %zu contour points, %zu wall segments, %zu blade samples. Opening gap: %zu -> %zu.",
-      contour_points_.size(),
-      segments_.size(),
+      contour_model_.points.size(),
+      contour_model_.wall_segments.size(),
       blade_samples_local_.size(),
-      gap_index_,
-      (gap_index_ + 1) % contour_points_.size());
+      contour_model_.opening_gap_index,
+      (contour_model_.opening_gap_index + 1) % contour_model_.points.size());
     RCLCPP_INFO(
       get_logger(),
       "Dynamic detection periods: idle=%.2f ms, moving=%.2f ms, insert=%.2f ms, danger=%.2f ms, marker=%.2f ms.",
@@ -153,120 +139,6 @@ public:
   }
 
 private:
-  static std::string trim(const std::string & text)
-  {
-    const auto begin = text.find_first_not_of(" \t\r\n");
-    if (begin == std::string::npos) {
-      return "";
-    }
-    const auto end = text.find_last_not_of(" \t\r\n");
-    return text.substr(begin, end - begin + 1);
-  }
-
-  static bool parseCsvLine(const std::string & line, Vec3 & point)
-  {
-    std::stringstream stream(line);
-    std::string item;
-    std::vector<double> values;
-
-    while (std::getline(stream, item, ',')) {
-      try {
-        values.push_back(std::stod(trim(item)));
-      } catch (const std::exception &) {
-        return false;
-      }
-    }
-
-    if (values.size() < 2) {
-      return false;
-    }
-
-    point.x = values[0];
-    point.y = values[1];
-    point.z = values.size() >= 3 ? values[2] : 0.0;
-    return true;
-  }
-
-  static std::vector<Vec3> loadCsv(const std::string & path, const double scale)
-  {
-    std::ifstream file(path);
-    if (!file.is_open()) {
-      throw std::runtime_error("Failed to open contour CSV: " + path);
-    }
-
-    std::vector<Vec3> points;
-    std::string line;
-    while (std::getline(file, line)) {
-      if (trim(line).empty()) {
-        continue;
-      }
-
-      Vec3 point{};
-      if (!parseCsvLine(line, point)) {
-        continue;
-      }
-
-      points.push_back(Vec3{point.x * scale, point.y * scale, point.z * scale});
-    }
-
-    if (points.size() < 3) {
-      throw std::runtime_error("Contour CSV must contain at least three numeric points.");
-    }
-
-    return points;
-  }
-
-  void forceContourZ(std::vector<Vec3> & points) const
-  {
-    for (auto & point : points) {
-      point.z = contour_z_;
-    }
-  }
-
-  static double distance3(const Vec3 & a, const Vec3 & b)
-  {
-    const double dx = a.x - b.x;
-    const double dy = a.y - b.y;
-    const double dz = a.z - b.z;
-    return std::sqrt(dx * dx + dy * dy + dz * dz);
-  }
-
-  static size_t findLargestGap(const std::vector<Vec3> & points)
-  {
-    double max_distance = -std::numeric_limits<double>::infinity();
-    size_t gap_index = 0;
-
-    for (size_t i = 0; i < points.size(); ++i) {
-      const size_t j = (i + 1) % points.size();
-      const double d = distance3(points[i], points[j]);
-      if (d > max_distance) {
-        max_distance = d;
-        gap_index = i;
-      }
-    }
-
-    return gap_index;
-  }
-
-  static std::vector<Segment> makeSegments(
-    const std::vector<Vec3> & points,
-    const size_t gap_index)
-  {
-    std::vector<Segment> segments;
-    segments.reserve(points.size() - 1);
-
-    for (size_t i = 0; i < points.size(); ++i) {
-      if (i == gap_index) {
-        continue;
-      }
-
-      const size_t j = (i + 1) % points.size();
-      segments.push_back(Segment{points[i], points[j]});
-    }
-
-    return segments;
-  }
-
   std::vector<Vec2> makeBladeSamples() const
   {
     const double radius = get_parameter("blade_radius").as_double();
@@ -295,17 +167,6 @@ private:
     return degrees * M_PI / 180.0;
   }
 
-  std::string resolvePackagePath(const std::string & path) const
-  {
-    if (path.empty() || path.front() == '/') {
-      return path;
-    }
-
-    const std::string package_share =
-      ament_index_cpp::get_package_share_directory("ur5e_blade_safety");
-    return package_share + "/" + path;
-  }
-
   std::vector<Vec3> transformBladeSamples(
     const geometry_msgs::msg::TransformStamped & transform) const
   {
@@ -329,48 +190,6 @@ private:
     return samples;
   }
 
-  static DistanceResult distancePointToSegment2d(const Vec3 & p, const Segment & segment)
-  {
-    const double ax = segment.a.x;
-    const double ay = segment.a.y;
-    const double bx = segment.b.x;
-    const double by = segment.b.y;
-    const double abx = bx - ax;
-    const double aby = by - ay;
-    const double apx = p.x - ax;
-    const double apy = p.y - ay;
-    const double ab_len2 = abx * abx + aby * aby;
-
-    double u = 0.0;
-    if (ab_len2 > 1.0e-12) {
-      u = std::clamp((apx * abx + apy * aby) / ab_len2, 0.0, 1.0);
-    }
-
-    const Vec3 closest{ax + u * abx, ay + u * aby, segment.a.z + u * (segment.b.z - segment.a.z)};
-    const double dx = p.x - closest.x;
-    const double dy = p.y - closest.y;
-    return DistanceResult{std::sqrt(dx * dx + dy * dy), p, closest};
-  }
-
-  DistanceResult computeMinimumDistance(const std::vector<Vec3> & samples) const
-  {
-    DistanceResult best{
-      std::numeric_limits<double>::infinity(),
-      Vec3{0.0, 0.0, 0.0},
-      Vec3{0.0, 0.0, 0.0}};
-
-    for (const auto & sample : samples) {
-      for (const auto & segment : segments_) {
-        const DistanceResult current = distancePointToSegment2d(sample, segment);
-        if (current.distance < best.distance) {
-          best = current;
-        }
-      }
-    }
-
-    return best;
-  }
-
   DetectionResult runCoreDetection(
     const geometry_msgs::msg::TransformStamped & transform) const
   {
@@ -382,7 +201,9 @@ private:
         Vec3{0.0, 0.0, 0.0}},
       true};
 
-    result.min_result = computeMinimumDistance(result.samples_base);
+    result.min_result = computeMinimumDistance(
+      result.samples_base,
+      contour_model_.wall_segments);
     result.safe = result.min_result.distance > safety_margin_;
     return result;
   }
@@ -431,7 +252,7 @@ private:
     updateDetectionPeriod(detection.safe, detection.min_result.distance);
     publishSafetyState(detection, core_ms);
     logUnsafeTransition(detection);
-    maybePublishMarkers(callback_time, detection);
+    maybePublishMarkers(callback_time);
     updateTimingLog(callback_time, core_ms, detection);
   }
 
@@ -477,9 +298,7 @@ private:
     last_safe_ = detection.safe;
   }
 
-  void maybePublishMarkers(
-    const rclcpp::Time & now,
-    const DetectionResult & detection)
+  void maybePublishMarkers(const rclcpp::Time & now)
   {
     if (!publish_markers_) {
       return;
@@ -491,10 +310,7 @@ private:
       return;
     }
 
-    marker_pub_->publish(makeMarkers(
-      detection.samples_base,
-      detection.min_result,
-      detection.safe));
+    marker_pub_->publish(makeMarkers());
     last_marker_publish_time_ = now;
     last_marker_publish_time_valid_ = true;
   }
@@ -573,7 +389,7 @@ private:
     marker.color.b = 1.0F;
     marker.color.a = 1.0F;
 
-    for (const auto & segment : segments_) {
+    for (const auto & segment : contour_model_.wall_segments) {
       marker.points.push_back(toPoint(segment.a));
       marker.points.push_back(toPoint(segment.b));
     }
@@ -581,116 +397,148 @@ private:
     return marker;
   }
 
-  visualization_msgs::msg::Marker makeOpeningMarker() const
+  Vec3 withZ(const Vec3 & point, const double z) const
   {
-    visualization_msgs::msg::Marker marker;
-    marker.header.frame_id = base_frame_;
-    marker.header.stamp = rclcpp::Time(0);
-    marker.ns = "blade_contour_safety";
-    marker.id = 1;
-    marker.type = visualization_msgs::msg::Marker::SPHERE_LIST;
-    marker.action = visualization_msgs::msg::Marker::ADD;
-    marker.pose.orientation.w = 1.0;
-    marker.scale.x = 0.025;
-    marker.scale.y = 0.025;
-    marker.scale.z = 0.025;
-    marker.color.r = 1.0F;
-    marker.color.g = 0.85F;
-    marker.color.b = 0.0F;
-    marker.color.a = 1.0F;
-    marker.points.push_back(toPoint(contour_points_[gap_index_]));
-    marker.points.push_back(toPoint(contour_points_[(gap_index_ + 1) % contour_points_.size()]));
-    return marker;
+    return Vec3{point.x, point.y, z};
   }
 
-  visualization_msgs::msg::Marker makeSampleMarker(
-    const std::vector<Vec3> & samples,
-    const bool safe) const
+  visualization_msgs::msg::Marker makeContourShellWallMarker() const
   {
     visualization_msgs::msg::Marker marker;
     marker.header.frame_id = base_frame_;
     marker.header.stamp = rclcpp::Time(0);
     marker.ns = "blade_contour_safety";
-    marker.id = 2;
-    marker.type = visualization_msgs::msg::Marker::SPHERE_LIST;
+    marker.id = 10;
+    marker.type = visualization_msgs::msg::Marker::TRIANGLE_LIST;
     marker.action = visualization_msgs::msg::Marker::ADD;
     marker.pose.orientation.w = 1.0;
-    marker.scale.x = sample_radius_;
-    marker.scale.y = sample_radius_;
-    marker.scale.z = sample_radius_;
-    marker.color.r = safe ? 0.0F : 1.0F;
-    marker.color.g = safe ? 0.85F : 0.0F;
-    marker.color.b = 0.1F;
-    marker.color.a = 0.85F;
+    marker.scale.x = 1.0;
+    marker.scale.y = 1.0;
+    marker.scale.z = 1.0;
+    marker.color.r = 0.0F;
+    marker.color.g = 0.55F;
+    marker.color.b = 1.0F;
+    marker.color.a = static_cast<float>(shell_wall_alpha_);
 
-    for (const auto & sample : samples) {
-      marker.points.push_back(toPoint(sample));
+    const double top_z = shell_bottom_z_ + shell_height_;
+    if (top_z <= shell_bottom_z_) {
+      return marker;
+    }
+
+    for (const auto & segment : contour_model_.wall_segments) {
+      const Vec3 a_bottom = withZ(segment.a, shell_bottom_z_);
+      const Vec3 b_bottom = withZ(segment.b, shell_bottom_z_);
+      const Vec3 a_top = withZ(segment.a, top_z);
+      const Vec3 b_top = withZ(segment.b, top_z);
+
+      marker.points.push_back(toPoint(a_bottom));
+      marker.points.push_back(toPoint(b_bottom));
+      marker.points.push_back(toPoint(b_top));
+
+      marker.points.push_back(toPoint(a_bottom));
+      marker.points.push_back(toPoint(b_top));
+      marker.points.push_back(toPoint(a_top));
     }
 
     return marker;
   }
 
-  visualization_msgs::msg::Marker makeDangerMarker(const DistanceResult & min_result) const
+  visualization_msgs::msg::Marker makeContourShellEdgeMarker() const
   {
     visualization_msgs::msg::Marker marker;
     marker.header.frame_id = base_frame_;
     marker.header.stamp = rclcpp::Time(0);
     marker.ns = "blade_contour_safety";
-    marker.id = 3;
-    marker.type = visualization_msgs::msg::Marker::SPHERE;
+    marker.id = 11;
+    marker.type = visualization_msgs::msg::Marker::LINE_LIST;
     marker.action = visualization_msgs::msg::Marker::ADD;
-    marker.pose.position = toPoint(min_result.closest_boundary_point);
     marker.pose.orientation.w = 1.0;
-    marker.scale.x = danger_radius_;
-    marker.scale.y = danger_radius_;
-    marker.scale.z = danger_radius_;
+    marker.scale.x = shell_edge_width_;
+    marker.color.r = 0.0F;
+    marker.color.g = 0.85F;
+    marker.color.b = 1.0F;
+    marker.color.a = 0.85F;
+
+    const double top_z = shell_bottom_z_ + shell_height_;
+    if (top_z <= shell_bottom_z_) {
+      return marker;
+    }
+
+    for (const auto & segment : contour_model_.wall_segments) {
+      const Vec3 a_bottom = withZ(segment.a, shell_bottom_z_);
+      const Vec3 b_bottom = withZ(segment.b, shell_bottom_z_);
+      const Vec3 a_top = withZ(segment.a, top_z);
+      const Vec3 b_top = withZ(segment.b, top_z);
+
+      marker.points.push_back(toPoint(a_bottom));
+      marker.points.push_back(toPoint(b_bottom));
+      marker.points.push_back(toPoint(a_top));
+      marker.points.push_back(toPoint(b_top));
+      marker.points.push_back(toPoint(a_bottom));
+      marker.points.push_back(toPoint(a_top));
+      marker.points.push_back(toPoint(b_bottom));
+      marker.points.push_back(toPoint(b_top));
+    }
+
+    return marker;
+  }
+
+  visualization_msgs::msg::Marker makeOpeningLineMarker() const
+  {
+    visualization_msgs::msg::Marker marker;
+    marker.header.frame_id = base_frame_;
+    marker.header.stamp = rclcpp::Time(0);
+    marker.ns = "blade_contour_safety";
+    marker.id = 12;
+    marker.type = visualization_msgs::msg::Marker::LINE_LIST;
+    marker.action = visualization_msgs::msg::Marker::ADD;
+    marker.pose.orientation.w = 1.0;
+    marker.scale.x = opening_line_width_;
     marker.color.r = 1.0F;
-    marker.color.g = 0.0F;
+    marker.color.g = 1.0F;
+    marker.color.b = 1.0F;
+    marker.color.a = 1.0F;
+
+    const auto & points = contour_model_.points;
+    const auto gap_index = contour_model_.opening_gap_index;
+    marker.points.push_back(toPoint(points[gap_index]));
+    marker.points.push_back(toPoint(points[(gap_index + 1) % points.size()]));
+    return marker;
+  }
+
+  visualization_msgs::msg::Marker makeOpeningEndpointMarker() const
+  {
+    visualization_msgs::msg::Marker marker;
+    marker.header.frame_id = base_frame_;
+    marker.header.stamp = rclcpp::Time(0);
+    marker.ns = "blade_contour_safety";
+    marker.id = 13;
+    marker.type = visualization_msgs::msg::Marker::SPHERE_LIST;
+    marker.action = visualization_msgs::msg::Marker::ADD;
+    marker.pose.orientation.w = 1.0;
+    marker.scale.x = endpoint_radius_;
+    marker.scale.y = endpoint_radius_;
+    marker.scale.z = endpoint_radius_;
+    marker.color.r = 1.0F;
+    marker.color.g = 0.85F;
     marker.color.b = 0.0F;
     marker.color.a = 1.0F;
+    const auto & points = contour_model_.points;
+    const auto gap_index = contour_model_.opening_gap_index;
+    marker.points.push_back(toPoint(points[gap_index]));
+    marker.points.push_back(toPoint(points[(gap_index + 1) % points.size()]));
     return marker;
   }
 
-  visualization_msgs::msg::Marker makeTextMarker(
-    const DistanceResult & min_result,
-    const bool safe) const
-  {
-    visualization_msgs::msg::Marker marker;
-    marker.header.frame_id = base_frame_;
-    marker.header.stamp = rclcpp::Time(0);
-    marker.ns = "blade_contour_safety";
-    marker.id = 4;
-    marker.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
-    marker.action = visualization_msgs::msg::Marker::ADD;
-    marker.pose.position = min_result.sample_point.x == 0.0 && min_result.sample_point.y == 0.0 ?
-      toPoint(contour_points_[gap_index_]) :
-      toPoint(min_result.sample_point);
-    marker.pose.position.z += 0.08;
-    marker.pose.orientation.w = 1.0;
-    marker.scale.z = 0.05;
-    marker.color.r = safe ? 0.0F : 1.0F;
-    marker.color.g = safe ? 0.85F : 0.0F;
-    marker.color.b = 0.1F;
-    marker.color.a = 1.0F;
-
-    std::ostringstream text;
-    text.setf(std::ios::fixed);
-    text.precision(4);
-    text << (safe ? "SAFE" : "UNSAFE") << " d=" << min_result.distance;
-    marker.text = text.str();
-    return marker;
-  }
-
-  visualization_msgs::msg::MarkerArray makeMarkers(
-    const std::vector<Vec3> & samples,
-    const DistanceResult & min_result,
-    const bool safe) const
+  visualization_msgs::msg::MarkerArray makeMarkers() const
   {
     visualization_msgs::msg::MarkerArray markers;
     markers.markers.push_back(makeDeleteAllMarker());
-    markers.markers.push_back(makeSampleMarker(samples, safe));
-    markers.markers.push_back(makeDangerMarker(min_result));
-    markers.markers.push_back(makeTextMarker(min_result, safe));
+    markers.markers.push_back(makeContourShellWallMarker());
+    markers.markers.push_back(makeContourShellEdgeMarker());
+    markers.markers.push_back(makeBoundaryMarker());
+    markers.markers.push_back(makeOpeningLineMarker());
+    markers.markers.push_back(makeOpeningEndpointMarker());
     return markers;
   }
 
@@ -710,12 +558,14 @@ private:
   bool publish_markers_;
   double marker_publish_period_ms_;
   double boundary_line_width_;
-  double sample_radius_;
-  double danger_radius_;
-  std::vector<Vec3> contour_points_;
-  std::vector<Segment> segments_;
+  double opening_line_width_;
+  double shell_bottom_z_;
+  double shell_height_;
+  double shell_edge_width_;
+  double shell_wall_alpha_;
+  double endpoint_radius_;
+  ContourModel contour_model_;
   std::vector<Vec2> blade_samples_local_;
-  size_t gap_index_;
 
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;

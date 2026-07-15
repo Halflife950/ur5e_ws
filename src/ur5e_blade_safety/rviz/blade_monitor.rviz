@@ -54,6 +54,18 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /opening_alignment_markers
       Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Blade Contour Safety
+      Namespaces:
+        blade_contour_safety: true
+      Topic:
+        Depth: 100
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /blade_contour_safety_markers
+      Value: true
     - Acceleration_Scaling_Factor: 0.1
       Class: moveit_rviz_plugin/MotionPlanning
       Enabled: true

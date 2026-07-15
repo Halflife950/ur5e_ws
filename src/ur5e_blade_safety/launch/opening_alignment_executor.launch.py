@@ -13,6 +13,7 @@ def generate_launch_description():
         'blade_task_tuning.yaml',
     ])
     tuning_file = LaunchConfiguration('tuning_file')
+    use_sim_time = LaunchConfiguration('use_sim_time')
 
     kinematics_file = PathJoinSubstitution([
         FindPackageShare('ur_moveit_config'),
@@ -24,18 +25,23 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'tuning_file',
             default_value=default_tuning_file,
-            description='Central tuning yaml for the opening insert executor.',
+            description='Central tuning yaml for the opening alignment executor.',
+        ),
+        DeclareLaunchArgument(
+            'use_sim_time',
+            default_value='true',
+            description='Use simulation time for the alignment executor.',
         ),
         Node(
             package='ur5e_blade_safety',
-            executable='opening_insert_executor',
-            name='opening_insert_executor',
+            executable='opening_alignment_executor',
+            name='opening_alignment_executor',
             output='screen',
             parameters=[
                 kinematics_file,
                 tuning_file,
                 {
-                    'use_sim_time': True,
+                    'use_sim_time': use_sim_time,
                 },
             ],
         ),

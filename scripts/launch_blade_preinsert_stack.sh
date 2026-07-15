@@ -100,21 +100,23 @@ wait_for_topic "/joint_states" "$GAZEBO_READY_TIMEOUT_S"
 wait_for_action "/joint_trajectory_controller/follow_joint_trajectory" "$GAZEBO_READY_TIMEOUT_S"
 
 echo "[blade-stack] opening opening-monitor terminal..."
-open_terminal "blade opening monitor" "ros2 launch ur5e_blade_safety opening_monitor.launch.py"
+open_terminal "blade opening monitor" \
+  "ros2 launch ur5e_blade_safety opening_monitor.launch.py use_sim_time:=true enable_alignment:=true enable_interlock:=true"
 
 wait_for_node "/opening_alignment_planner" "$MONITOR_READY_TIMEOUT_S"
 wait_for_node "/blade_contour_safety" "$MONITOR_READY_TIMEOUT_S"
 wait_for_node "/blade_motion_safety_interlock" "$MONITOR_READY_TIMEOUT_S"
+wait_for_topic "/blade_approach_pose" "$MONITOR_READY_TIMEOUT_S"
 wait_for_topic "/blade_preinsert_pose" "$MONITOR_READY_TIMEOUT_S"
 wait_for_topic "/blade_contour_safe" "$MONITOR_READY_TIMEOUT_S"
 
-echo "[blade-stack] opening insert-executor terminal to initialize robot to pre-insert..."
-open_terminal "blade insert executor" "ros2 launch ur5e_blade_safety opening_insert_executor.launch.py"
+echo "[blade-stack] opening alignment-executor terminal to move robot to pre-insert..."
+open_terminal "blade alignment executor" "ros2 launch ur5e_blade_safety opening_alignment_executor.launch.py"
 
 echo
-echo "[blade-stack] started Gazebo/MoveIt, opening monitor, and insert executor."
-echo "[blade-stack] Watch the insert-executor terminal until it reaches pre-insert."
-echo "[blade-stack] Then run the final motion in another terminal, for example:"
+echo "[blade-stack] started Gazebo/MoveIt, opening monitor, and alignment executor."
+echo "[blade-stack] Watch the alignment-executor terminal until it reaches pre-insert."
+echo "[blade-stack] Then run the final motion in another terminal/program, for example:"
 echo "  cd $WORKSPACE_DIR"
 echo "  source install/setup.bash"
 echo "  ros2 launch ur5e_blade_safety cartesian_forward_probe.launch.py"

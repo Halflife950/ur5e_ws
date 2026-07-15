@@ -16,9 +16,11 @@
   <depend>moveit_ros_planning_interface</depend>
   <depend>rclcpp</depend>
   <depend>rclcpp_action</depend>
+  <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
   <depend>tf2</depend>
   <depend>tf2_ros</depend>
+  <depend>trajectory_msgs</depend>
   <depend>visualization_msgs</depend>
 
   <test_depend>ament_lint_auto</test_depend>

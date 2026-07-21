@@ -34,7 +34,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, FindExecutable, LaunchConfiguration, PathJoinSubstitution
-from launch_ros.actions import Node
+from launch_ros.actions import Node, SetParametersFromFile
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 from ur_moveit_config.launch_common import load_yaml
@@ -57,6 +57,10 @@ def launch_setup(context, *args, **kwargs):
     moveit_config_file = LaunchConfiguration("moveit_config_file")
     moveit_joint_limits_file = LaunchConfiguration("moveit_joint_limits_file")
     warehouse_sqlite_path = LaunchConfiguration("warehouse_sqlite_path")
+    launch_rviz = LaunchConfiguration("launch_rviz")
+    launch_servo = LaunchConfiguration("launch_servo")
+    rviz_config_package = LaunchConfiguration("rviz_config_package")
+    rviz_config_file = LaunchConfiguration("rviz_config_file")
     prefix = LaunchConfiguration("prefix")
 
     ur_control_launch = IncludeLaunchDescription(
@@ -94,6 +98,7 @@ def launch_setup(context, *args, **kwargs):
             "prefix": prefix,
             "use_sim_time": "true",
             "launch_rviz": "false",
+            "launch_servo": launch_servo,
             "use_fake_hardware": "true",  # to change moveit default controller to joint_trajectory_controller
         }.items(),
     )
@@ -200,17 +205,14 @@ def launch_setup(context, *args, **kwargs):
         "warehouse_plugin": "warehouse_ros_sqlite::DatabaseConnection",
         "warehouse_host": warehouse_sqlite_path,
     }
-
     rviz_node = Node(
         package="rviz2",
         executable="rviz2",
-        name="rviz2_blade_monitor",
+        name="rviz2_moveit",
         output="log",
         arguments=[
             "-d",
-            PathJoinSubstitution(
-                [FindPackageShare("ur5e_blade_safety"), "rviz", "blade_monitor.rviz"]
-            ),
+            PathJoinSubstitution([FindPackageShare(rviz_config_package), "rviz", rviz_config_file]),
         ],
         parameters=[
             robot_description,
@@ -229,10 +231,19 @@ def launch_setup(context, *args, **kwargs):
     )
 
     nodes_to_launch = [
+        SetParametersFromFile(
+            os.path.join(
+                os.path.dirname(os.path.realpath(__file__)),
+                "..",
+                "config",
+                "sim_occupancy_map_monitor.yaml",
+            )
+        ),
         ur_control_launch,
         ur_moveit_launch,
-        rviz_node,
     ]
+    if str(launch_rviz.perform(context)).lower() in ("true", "1", "yes", "on"):
+        nodes_to_launch.append(rviz_node)
 
     return nodes_to_launch
 
@@ -346,6 +357,26 @@ def generate_launch_description():
             "warehouse_sqlite_path",
             default_value=os.path.expanduser("~/.ros/warehouse_ros.sqlite"),
             description="Path where the warehouse database should be stored.",
+        )
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument("launch_rviz", default_value="true", description="Launch RViz?")
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument("launch_servo", default_value="false", description="Launch MoveIt Servo?")
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            "rviz_config_package",
+            default_value="ur_moveit_config",
+            description="Package containing the RViz config file in its rviz folder.",
+        )
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            "rviz_config_file",
+            default_value="view_robot.rviz",
+            description="RViz config file name inside the selected package's rviz folder.",
         )
     )
     declared_arguments.append(
